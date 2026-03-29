@@ -1,0 +1,184 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Base resets ─────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: 'Inter', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* ── Scrollbar styling ───────────────────────────────── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(100,116,139,0.3); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(100,116,139,0.5); }
+
+/* ── Circular Progress SVG ───────────────────────────── */
+.progress-ring {
+  transform: rotate(-90deg);
+  transform-origin: 50% 50%;
+}
+
+.progress-ring-circle {
+  transition: stroke-dashoffset 1s linear;
+  stroke-linecap: round;
+}
+
+/* ── Timer glow ──────────────────────────────────────── */
+.timer-glow {
+  filter: drop-shadow(0 0 24px rgba(77, 110, 245, 0.25));
+}
+
+.timer-glow-focus {
+  filter: drop-shadow(0 0 32px rgba(77, 110, 245, 0.35));
+}
+
+.timer-glow-break {
+  filter: drop-shadow(0 0 32px rgba(16, 185, 129, 0.35));
+}
+
+/* ── Glass card ──────────────────────────────────────── */
+.glass {
+  background: rgba(255,255,255,0.05);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255,255,255,0.08);
+}
+
+.glass-dark {
+  background: rgba(0,0,0,0.25);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255,255,255,0.06);
+}
+
+/* ── Keyboard shortcut badge ─────────────────────────── */
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1px 5px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  border-radius: 4px;
+  border: 1px solid currentColor;
+  opacity: 0.5;
+  letter-spacing: 0;
+}
+
+/* ── Smooth tab transitions ──────────────────────────── */
+.tab-content { animation: fadeIn 0.25s ease-out; }
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Ripple button effect ────────────────────────────── */
+.btn-ripple {
+  position: relative;
+  overflow: hidden;
+}
+.btn-ripple::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at center, rgba(255,255,255,0.15) 0%, transparent 70%);
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+.btn-ripple:active::after { opacity: 1; }
+
+/* ── Ambient sound bars ──────────────────────────────── */
+.sound-bar {
+  display: inline-block;
+  width: 3px;
+  border-radius: 2px;
+  animation: soundWave 1s ease-in-out infinite alternate;
+}
+.sound-bar:nth-child(1) { animation-delay: 0s; }
+.sound-bar:nth-child(2) { animation-delay: 0.15s; }
+.sound-bar:nth-child(3) { animation-delay: 0.3s; }
+.sound-bar:nth-child(4) { animation-delay: 0.45s; }
+
+@keyframes soundWave {
+  from { height: 4px; }
+  to   { height: 16px; }
+}
+
+/* ── Deep focus mode overlay ─────────────────────────── */
+.deep-focus-bg {
+  background: radial-gradient(ellipse at center, 
+    rgba(77,110,245,0.06) 0%, 
+    transparent 70%
+  );
+}
+
+/* ── Streak flame ────────────────────────────────────── */
+@keyframes flicker {
+  0%, 100% { transform: scale(1) rotate(-1deg); }
+  50%       { transform: scale(1.05) rotate(1deg); }
+}
+.flame-anim { animation: flicker 2s ease-in-out infinite; }
+
+/* ── Notification pulse ──────────────────────────────── */
+@keyframes notifPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(77,110,245,0.4); }
+  50%       { box-shadow: 0 0 0 8px rgba(77,110,245,0); }
+}
+.notif-pulse { animation: notifPulse 2s ease-in-out infinite; }
+
+/* ── Input focus ring ────────────────────────────────── */
+input:focus, textarea:focus, select:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(77,110,245,0.4);
+}
+
+/* ── Chart tooltip ───────────────────────────────────── */
+.recharts-tooltip-wrapper .recharts-default-tooltip {
+  border-radius: 8px !important;
+  border: 1px solid rgba(255,255,255,0.1) !important;
+  backdrop-filter: blur(8px) !important;
+}
+
+/* ── Range slider ────────────────────────────────────── */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 2px;
+  cursor: pointer;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #4d6ef5;
+  cursor: pointer;
+  transition: transform 0.15s;
+}
+input[type="range"]::-webkit-slider-thumb:hover {
+  transform: scale(1.2);
+}
+
+/* ── Task checkbox custom ────────────────────────────── */
+.task-checkbox {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}

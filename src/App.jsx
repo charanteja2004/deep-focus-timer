@@ -1,0 +1,629 @@
+/**
+ * App.jsx — DeepFocus Pomodoro Application
+ *
+ * Fixes applied:
+ * 1. Browser Fullscreen API for Deep Focus (icon changes to "exit fullscreen")
+ * 2. window.open() popup for Floating Timer (real detached window, works across tabs)
+ * 3. BroadcastChannel to sync timer state with popup window
+ * 4. DeepFocusMode has solid opaque background, no transparency
+ */
+
+import React, { useState, useEffect, useCallback, useRef } from 'react'
+import clsx from 'clsx'
+
+// Hooks
+import { useTimer, PHASES, PHASE_LABELS } from './hooks/useTimer'
+import { useStorage } from './hooks/useStorage'
+import { useAnalytics } from './hooks/useAnalytics'
+import { useAmbientSound } from './hooks/useAmbientSound'
+import { useNotifications } from './hooks/useNotifications'
+
+// Components
+import CircularTimer from './components/CircularTimer'
+import TaskPanel from './components/TaskPanel'
+import AnalyticsDashboard from './components/AnalyticsDashboard'
+import SettingsPanel from './components/SettingsPanel'
+import DeepFocusMode from './components/DeepFocusMode'
+
+// Icons
+import {
+  Play, Pause, SkipForward, RotateCcw,
+  AlertCircle, BarChart2, Settings, ListTodo,
+  Maximize2, Minimize2,
+  PictureInPicture2,
+  Zap,
+  Moon, Sun,
+} from 'lucide-react'
+
+// ── Default settings ───────────────────────────────────
+const DEFAULT_SETTINGS = {
+  focusDuration: 25,
+  shortBreakDuration: 5,
+  longBreakDuration: 15,
+  sessionsUntilLongBreak: 4,
+  autoStartBreaks: true,
+  autoStartFocus: false,
+}
+
+const TABS = [
+  { id: 'timer',      label: 'Timer',     icon: <Play size={14} /> },
+  { id: 'tasks',      label: 'Tasks',     icon: <ListTodo size={14} /> },
+  { id: 'analytics',  label: 'Analytics', icon: <BarChart2 size={14} /> },
+  { id: 'settings',   label: 'Settings',  icon: <Settings size={14} /> },
+]
+
+export default function App() {
+  // ── Persisted state ─────────────────────────────────
+  const [darkMode,     setDarkMode]     = useStorage('df_dark',     true)
+  const [settings,     setSettings]     = useStorage('df_settings', DEFAULT_SETTINGS)
+  const [sessions,     setSessions]     = useStorage('df_sessions', [])
+  const [tasks,        setTasks]        = useStorage('df_tasks',    [])
+  const [activeTaskId, setActiveTaskId] = useStorage('df_active_task', null)
+
+  // ── Ephemeral UI state ───────────────────────────────
+  const [tab,            setTab]            = useState('timer')
+  const [deepFocus,      setDeepFocus]      = useState(false)
+  const [isFullscreen,   setIsFullscreen]   = useState(false)
+  const [popupOpen,      setPopupOpen]      = useState(false)
+  const [showSuggestion, setShowSuggestion] = useState(false)
+  const popupWindowRef = useRef(null)
+  const bcRef          = useRef(null)
+
+  // ── Apply theme ──────────────────────────────────────
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', darkMode)
+  }, [darkMode])
+
+  // ── BroadcastChannel setup ───────────────────────────
+  useEffect(() => {
+    bcRef.current = new BroadcastChannel('deepfocus_timer')
+
+    bcRef.current.onmessage = (e) => {
+      const { type, cmd } = e.data
+      if (type === 'command') {
+        if      (cmd === 'play')        { if (elapsedRef.current > 0) resumeRef.current() ; else startRef.current() }
+        else if (cmd === 'pause')       { pauseRef.current() }
+        else if (cmd === 'distraction') { logDistractionRef.current() }
+      }
+      if (type === 'request_state') {
+        broadcastState()
+      }
+    }
+
+    return () => { bcRef.current?.close() }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // ── Track browser fullscreen state ───────────────────
+  useEffect(() => {
+    const handleFSChange = () => {
+      const isFull = !!document.fullscreenElement
+      setIsFullscreen(isFull)
+      // If user pressed ESC to exit fullscreen, also exit our deep focus UI
+      if (!isFull && deepFocus) setDeepFocus(false)
+    }
+    document.addEventListener('fullscreenchange', handleFSChange)
+    return () => document.removeEventListener('fullscreenchange', handleFSChange)
+  }, [deepFocus])
+
+  // ── Enter / Exit deep focus (browser fullscreen) ─────
+  const enterDeepFocus = useCallback(async () => {
+    setDeepFocus(true)
+    try {
+      if (!document.fullscreenElement) {
+        await document.documentElement.requestFullscreen()
+      }
+    } catch { /* fullscreen not supported */ }
+  }, [])
+
+  const exitDeepFocus = useCallback(async () => {
+    setDeepFocus(false)
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen()
+      }
+    } catch { /* ignore */ }
+  }, [])
+
+  // ── Popup window management ───────────────────────────
+  const openPopup = useCallback(() => {
+    // Close existing popup if any
+    if (popupWindowRef.current && !popupWindowRef.current.closed) {
+      popupWindowRef.current.focus()
+      return
+    }
+
+    const w = 240, h = 120
+    const left = window.screen.width - w - 20
+    const top  = window.screen.height - h - 60
+
+    const popup = window.open(
+      '/popup.html',
+      'deepfocus_popup',
+      `width=${w},height=${h},left=${left},top=${top},resizable=no,toolbar=no,menubar=no,scrollbars=no,status=no,location=no`
+    )
+
+    if (!popup) {
+      alert('Popup blocked! Please allow popups for this site.')
+      return
+    }
+
+    popupWindowRef.current = popup
+    setPopupOpen(true)
+
+    // Broadcast state as soon as popup requests it (it may request after load)
+    // Also proactively send after a short delay
+    setTimeout(() => broadcastState(), 600)
+
+    // Poll for popup close
+    const pollClose = setInterval(() => {
+      if (popup.closed) {
+        clearInterval(pollClose)
+        setPopupOpen(false)
+        popupWindowRef.current = null
+      }
+    }, 500)
+  }, [])  // eslint-disable-line
+
+  const closePopup = useCallback(() => {
+    if (popupWindowRef.current && !popupWindowRef.current.closed) {
+      popupWindowRef.current.close()
+    }
+    popupWindowRef.current = null
+    setPopupOpen(false)
+  }, [])
+
+  const togglePopup = useCallback(() => {
+    if (popupOpen && popupWindowRef.current && !popupWindowRef.current.closed) {
+      closePopup()
+    } else {
+      openPopup()
+    }
+  }, [popupOpen, openPopup, closePopup])
+
+  // ── Broadcast timer state to popup ────────────────────
+  const broadcastState = useCallback(() => {
+    if (!bcRef.current) return
+    const activeTask = tasks.find(t => t.id === activeTaskId) || null
+    bcRef.current.postMessage({
+      type: 'state',
+      payload: {
+        timeLeft: timerStateRef.current.timeLeft,
+        phase:    timerStateRef.current.phase,
+        running:  timerStateRef.current.running,
+        activeTask,
+      },
+    })
+  }, [tasks, activeTaskId])   // eslint-disable-line
+
+  // ── Session complete ──────────────────────────────────
+  const handleSessionComplete = useCallback((sessionData) => {
+    setSessions(prev => [...prev, sessionData])
+    setShowSuggestion(true)
+    setTimeout(() => setShowSuggestion(false), 8000)
+  }, [setSessions])
+
+  // ── Timer hook ────────────────────────────────────────
+  const mergedSettings = { ...DEFAULT_SETTINGS, ...settings }
+  const {
+    phase, timeLeft, running, sessionCount,
+    distractions, pauses, progress, elapsedSeconds,
+    start, pause, resume, reset, skipPhase, logDistraction, setPhaseManual,
+  } = useTimer(mergedSettings, handleSessionComplete)
+
+  // Keep stable refs for BroadcastChannel handler
+  const elapsedRef         = useRef(elapsedSeconds)
+  const startRef           = useRef(start)
+  const resumeRef          = useRef(resume)
+  const pauseRef           = useRef(pause)
+  const logDistractionRef  = useRef(logDistraction)
+  const timerStateRef      = useRef({ timeLeft, phase, running })
+
+  useEffect(() => { elapsedRef.current = elapsedSeconds },   [elapsedSeconds])
+  useEffect(() => { startRef.current   = start },            [start])
+  useEffect(() => { resumeRef.current  = resume },           [resume])
+  useEffect(() => { pauseRef.current   = pause },            [pause])
+  useEffect(() => { logDistractionRef.current = logDistraction }, [logDistraction])
+  useEffect(() => { timerStateRef.current = { timeLeft, phase, running } }, [timeLeft, phase, running])
+
+  // Broadcast on every tick when popup is open
+  useEffect(() => {
+    if (popupOpen) broadcastState()
+  }, [timeLeft, running, phase, popupOpen, broadcastState])
+
+  // ── Analytics ─────────────────────────────────────────
+  const stats = useAnalytics(sessions)
+
+  // ── Ambient sound ─────────────────────────────────────
+  const { activeSound, volume, play: playSound, updateVolume } = useAmbientSound()
+
+  // ── Notifications ─────────────────────────────────────
+  useNotifications(running, timeLeft, phase, distractions)
+
+  // ── Keyboard shortcuts ────────────────────────────────
+  useEffect(() => {
+    const handler = (e) => {
+      if (['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return
+      if (e.code === 'Space') {
+        e.preventDefault()
+        if (running) pause()
+        else if (elapsedSeconds > 0) resume()
+        else start()
+      }
+      if (e.code === 'KeyF' && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault()
+        if (deepFocus) exitDeepFocus()
+        else enterDeepFocus()
+      }
+      if (e.code === 'KeyR' && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault()
+        reset()
+      }
+      if (e.code === 'Escape' && deepFocus) {
+        exitDeepFocus()
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [running, elapsedSeconds, start, pause, resume, reset, deepFocus, enterDeepFocus, exitDeepFocus])
+
+  // ── Helpers ───────────────────────────────────────────
+  const activeTask   = tasks.find(t => t.id === activeTaskId) || null
+  const clearData    = () => { setSessions([]); setTasks([]); setActiveTaskId(null); reset() }
+
+  const handlePrimary = () => {
+    if (running) pause()
+    else if (elapsedSeconds > 0) resume()
+    else start()
+  }
+
+  const phaseColor = {
+    [PHASES.FOCUS]:       'bg-brand-600 hover:bg-brand-500 shadow-brand-600/25',
+    [PHASES.SHORT_BREAK]: 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-600/25',
+    [PHASES.LONG_BREAK]:  'bg-violet-600 hover:bg-violet-500 shadow-violet-600/25',
+  }[phase]
+
+  return (
+    <div className={clsx(
+      'min-h-screen transition-colors duration-300',
+      darkMode ? 'bg-surface-950 text-white' : 'bg-surface-50 text-surface-900'
+    )}>
+
+      {/* ── Deep Focus fullscreen overlay ─── */}
+      {deepFocus && (
+        <DeepFocusMode
+          timeLeft={timeLeft}
+          progress={progress}
+          phase={phase}
+          running={running}
+          elapsedSeconds={elapsedSeconds}
+          onStart={start}
+          onPause={pause}
+          onResume={resume}
+          onSkip={skipPhase}
+          onDistraction={logDistraction}
+          distractions={distractions}
+          activeTask={activeTask}
+          onExit={exitDeepFocus}
+        />
+      )}
+
+      {/* ── Main layout ──────────────────── */}
+      <div className="max-w-lg mx-auto px-4 py-8 min-h-screen flex flex-col">
+
+        {/* ── Header ───────────────────── */}
+        <header className="flex items-center justify-between mb-8">
+          <div className="flex items-center gap-3">
+            <div className="w-7 h-7 rounded-full bg-brand-600 flex items-center justify-center">
+              <div className="w-2.5 h-2.5 rounded-full bg-white/80" />
+            </div>
+            <span className={clsx('font-semibold text-sm tracking-tight', darkMode ? 'text-white' : 'text-surface-800')}>
+              DeepFocus
+            </span>
+            {stats.streak > 0 && (
+              <span className="flex items-center gap-1 text-xs text-orange-400 bg-orange-400/10 border border-orange-400/20 rounded-full px-2 py-0.5">
+                <span className="flame-anim">🔥</span> {stats.streak}d
+              </span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-1">
+            {/* Theme toggle */}
+            <button
+              id="header-theme"
+              onClick={() => setDarkMode(d => !d)}
+              title="Toggle theme"
+              className={clsx(
+                'p-2 rounded-xl transition-all',
+                darkMode
+                  ? 'text-white/40 hover:text-white/80 hover:bg-white/5'
+                  : 'text-surface-400 hover:text-surface-700 hover:bg-surface-100'
+              )}
+            >
+              {darkMode ? <Sun size={15} /> : <Moon size={15} />}
+            </button>
+
+            {/* Floating popup toggle */}
+            <button
+              id="header-popup"
+              onClick={togglePopup}
+              title={popupOpen ? 'Close floating timer' : 'Open floating timer (stays on top)'}
+              className={clsx(
+                'p-2 rounded-xl transition-all',
+                popupOpen
+                  ? 'text-brand-400 bg-brand-500/10 border border-brand-500/20'
+                  : darkMode
+                    ? 'text-white/40 hover:text-white/80 hover:bg-white/5'
+                    : 'text-surface-400 hover:text-surface-700 hover:bg-surface-100'
+              )}
+            >
+              <PictureInPicture2 size={15} />
+            </button>
+
+            {/* Deep focus / fullscreen toggle */}
+            <button
+              id="header-deepfocus"
+              onClick={deepFocus ? exitDeepFocus : enterDeepFocus}
+              title={deepFocus || isFullscreen ? 'Exit deep focus (F)' : 'Enter deep focus (F)'}
+              className={clsx(
+                'p-2 rounded-xl transition-all',
+                (deepFocus || isFullscreen)
+                  ? 'text-brand-400 bg-brand-500/10 border border-brand-500/20'
+                  : darkMode
+                    ? 'text-white/40 hover:text-white/80 hover:bg-white/5'
+                    : 'text-surface-400 hover:text-surface-700 hover:bg-surface-100'
+              )}
+            >
+              {(deepFocus || isFullscreen) ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+            </button>
+          </div>
+        </header>
+
+        {/* ── Phase tabs ───────────────── */}
+        <div className={clsx(
+          'flex gap-1 p-1 rounded-2xl mb-8',
+          darkMode ? 'bg-white/5' : 'bg-surface-100'
+        )}>
+          {[PHASES.FOCUS, PHASES.SHORT_BREAK, PHASES.LONG_BREAK].map(p => (
+            <button
+              key={p}
+              id={`phase-tab-${p}`}
+              onClick={() => setPhaseManual(p)}
+              className={clsx(
+                'flex-1 py-2 rounded-xl text-xs font-medium transition-all duration-200',
+                phase === p
+                  ? darkMode ? 'bg-white/10 text-white shadow-sm' : 'bg-white text-surface-800 shadow-sm'
+                  : darkMode ? 'text-white/35 hover:text-white/60' : 'text-surface-400 hover:text-surface-600'
+              )}
+            >
+              {PHASE_LABELS[p]}
+            </button>
+          ))}
+        </div>
+
+        {/* ── Timer section ────────────── */}
+        <div className="flex flex-col items-center gap-6 mb-8">
+          <CircularTimer timeLeft={timeLeft} progress={progress} phase={phase} running={running} />
+
+          {/* Active task chip */}
+          {activeTask && (
+            <div className={clsx(
+              'flex items-center gap-2 px-4 py-2 rounded-xl text-sm',
+              darkMode ? 'bg-white/5 text-white/60' : 'bg-surface-100 text-surface-500'
+            )}>
+              <div className="w-2 h-2 rounded-full bg-brand-500 animate-pulse" />
+              <span className="max-w-[240px] truncate">{activeTask.text}</span>
+            </div>
+          )}
+
+          {/* Session dots */}
+          <div className="flex items-center gap-2">
+            {Array.from({ length: mergedSettings.sessionsUntilLongBreak }).map((_, i) => (
+              <div
+                key={i}
+                className={clsx(
+                  'w-2 h-2 rounded-full transition-all duration-300',
+                  i < (sessionCount % mergedSettings.sessionsUntilLongBreak)
+                    ? 'bg-brand-500 scale-110'
+                    : darkMode ? 'bg-white/10' : 'bg-surface-200'
+                )}
+              />
+            ))}
+            <span className={clsx('text-xs ml-1', darkMode ? 'text-white/25' : 'text-surface-300')}>
+              #{Math.floor(sessionCount / mergedSettings.sessionsUntilLongBreak) + 1}
+              .{(sessionCount % mergedSettings.sessionsUntilLongBreak) + 1}
+            </span>
+          </div>
+
+          {/* Controls */}
+          <div className="flex items-center gap-3">
+            <button
+              id="ctrl-reset"
+              onClick={reset}
+              className={clsx(
+                'p-3 rounded-2xl transition-all',
+                darkMode ? 'text-white/30 hover:text-white/70 hover:bg-white/8' : 'text-surface-300 hover:text-surface-600 hover:bg-surface-100'
+              )}
+              aria-label="Reset timer"
+            >
+              <RotateCcw size={17} />
+            </button>
+
+            <button
+              id="ctrl-primary"
+              onClick={handlePrimary}
+              className={clsx(
+                'flex items-center gap-2.5 px-8 py-3.5 rounded-2xl font-medium text-sm text-white',
+                'transition-all duration-200 active:scale-95 btn-ripple shadow-lg',
+                phaseColor
+              )}
+              aria-label={running ? 'Pause timer' : 'Start timer'}
+            >
+              {running
+                ? <><Pause size={17} strokeWidth={2.5} /> Pause</>
+                : <><Play  size={17} strokeWidth={2.5} /> {elapsedSeconds > 0 ? 'Resume' : 'Start'}</>
+              }
+            </button>
+
+            <button
+              id="ctrl-skip"
+              onClick={skipPhase}
+              className={clsx(
+                'p-3 rounded-2xl transition-all',
+                darkMode ? 'text-white/30 hover:text-white/70 hover:bg-white/8' : 'text-surface-300 hover:text-surface-600 hover:bg-surface-100'
+              )}
+              aria-label="Skip phase"
+            >
+              <SkipForward size={17} />
+            </button>
+          </div>
+
+          {/* Distraction button */}
+          {phase === PHASES.FOCUS && (
+            <button
+              id="log-distraction"
+              onClick={logDistraction}
+              className={clsx(
+                'flex items-center gap-1.5 text-xs transition-all duration-200 px-4 py-2 rounded-xl border',
+                distractions.length > 0
+                  ? 'text-orange-400 bg-orange-400/10 border-orange-400/20'
+                  : darkMode
+                    ? 'text-white/25 hover:text-white/50 border-white/8 hover:border-white/15'
+                    : 'text-surface-300 hover:text-surface-500 border-surface-100 hover:border-surface-200'
+              )}
+            >
+              <AlertCircle size={12} />
+              I got distracted
+              {distractions.length > 0 && (
+                <span className="bg-orange-400/20 text-orange-300 rounded-full px-1.5 text-[10px] font-mono">
+                  {distractions.length}
+                </span>
+              )}
+            </button>
+          )}
+
+          {/* Keyboard hints */}
+          <div className={clsx('flex items-center gap-4 text-xs', darkMode ? 'text-white/15' : 'text-surface-300')}>
+            <span><span className="kbd">Space</span> play/pause</span>
+            <span><span className="kbd">F</span> fullscreen</span>
+            <span><span className="kbd">R</span> reset</span>
+          </div>
+        </div>
+
+        {/* ── AI Suggestion toast ───────── */}
+        {showSuggestion && stats.bestDurationRange && (
+          <div className={clsx(
+            'flex items-start gap-3 rounded-2xl border px-4 py-3 mb-6 animate-slide-up',
+            darkMode ? 'bg-brand-500/8 border-brand-500/20 text-brand-300' : 'bg-brand-50 border-brand-200 text-brand-700'
+          )}>
+            <Zap size={14} className="flex-shrink-0 mt-0.5" />
+            <div className="text-xs leading-relaxed flex-1">
+              <strong>Insight:</strong> You focus best in {stats.bestDurationRange} sessions.
+              {stats.suggestedDuration !== mergedSettings.focusDuration && (
+                <button
+                  id="apply-suggestion"
+                  onClick={() => { setSettings(s => ({ ...s, focusDuration: stats.suggestedDuration })); setShowSuggestion(false) }}
+                  className="ml-2 underline opacity-70 hover:opacity-100"
+                >
+                  Apply {stats.suggestedDuration}min
+                </button>
+              )}
+            </div>
+            <button onClick={() => setShowSuggestion(false)} className="opacity-40 hover:opacity-80 text-xs">✕</button>
+          </div>
+        )}
+
+        {/* ── Tab nav ──────────────────── */}
+        <div className={clsx('flex gap-1 p-1 rounded-2xl mb-6', darkMode ? 'bg-white/4' : 'bg-surface-100')}>
+          {TABS.map(t => (
+            <button
+              key={t.id}
+              id={`tab-${t.id}`}
+              onClick={() => setTab(t.id)}
+              className={clsx(
+                'flex-1 flex items-center justify-center gap-1.5 py-2 rounded-xl text-xs font-medium transition-all duration-200',
+                tab === t.id
+                  ? darkMode ? 'bg-white/10 text-white' : 'bg-white text-surface-800 shadow-sm'
+                  : darkMode ? 'text-white/30 hover:text-white/60' : 'text-surface-400 hover:text-surface-600'
+              )}
+            >
+              {t.icon}
+              <span className="hidden sm:inline">{t.label}</span>
+            </button>
+          ))}
+        </div>
+
+        {/* ── Tab content ──────────────── */}
+        <div className="tab-content flex-1">
+          {tab === 'timer' && (
+            <div className={clsx('rounded-2xl border p-5', darkMode ? 'bg-white/3 border-white/6' : 'bg-white border-surface-100 shadow-sm')}>
+              <div className="flex items-center justify-between mb-4">
+                <h2 className={clsx('text-sm font-semibold', darkMode ? 'text-white/70' : 'text-surface-600')}>Today</h2>
+                <div className={clsx('flex items-center gap-3 text-xs', darkMode ? 'text-white/30' : 'text-surface-400')}>
+                  <span>⏱ {stats.todayFocusMinutes}m</span>
+                  <span>🎯 {stats.todaySessions} sessions</span>
+                  {stats.todayDistractions > 0 && <span>⚡ {stats.todayDistractions}</span>}
+                </div>
+              </div>
+              {(() => {
+                const todayS = sessions.filter(s => new Date(s.completedAt).toDateString() === new Date().toDateString())
+                return todayS.length === 0 ? (
+                  <p className={clsx('text-sm', darkMode ? 'text-white/20' : 'text-surface-300')}>
+                    No sessions yet today. Start your first focus block! 🚀
+                  </p>
+                ) : (
+                  <div className="flex flex-col gap-1">
+                    {[...todayS].reverse().slice(0, 5).map((s, i) => (
+                      <div key={i} className={clsx('flex items-center gap-2 text-xs py-1.5 px-2 rounded-lg', darkMode ? 'text-white/40' : 'text-surface-400')}>
+                        <span className="text-emerald-400">✓</span>
+                        <span>{Math.round(s.duration / 60)} min focus</span>
+                        {s.distractions > 0 && <span className="text-orange-400/60">({s.distractions}×)</span>}
+                        <span className="ml-auto">{new Date(s.completedAt).toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit' })}</span>
+                      </div>
+                    ))}
+                  </div>
+                )
+              })()}
+            </div>
+          )}
+
+          {tab === 'tasks' && (
+            <div className={clsx('rounded-2xl border p-5', darkMode ? 'bg-white/3 border-white/6' : 'bg-white border-surface-100 shadow-sm')}>
+              <h2 className={clsx('text-sm font-semibold mb-4', darkMode ? 'text-white/70' : 'text-surface-600')}>Session Tasks</h2>
+              <TaskPanel tasks={tasks} setTasks={setTasks} activeTaskId={activeTaskId} setActiveTaskId={setActiveTaskId} />
+            </div>
+          )}
+
+          {tab === 'analytics' && (
+            <div className={clsx('rounded-2xl border p-5', darkMode ? 'bg-white/3 border-white/6' : 'bg-white border-surface-100 shadow-sm')}>
+              <h2 className={clsx('text-sm font-semibold mb-6', darkMode ? 'text-white/70' : 'text-surface-600')}>Focus Analytics</h2>
+              <AnalyticsDashboard sessions={sessions} />
+            </div>
+          )}
+
+          {tab === 'settings' && (
+            <div className={clsx('rounded-2xl border p-5', darkMode ? 'bg-white/3 border-white/6' : 'bg-white border-surface-100 shadow-sm')}>
+              <h2 className={clsx('text-sm font-semibold mb-6', darkMode ? 'text-white/70' : 'text-surface-600')}>Preferences</h2>
+              <SettingsPanel
+                settings={mergedSettings}
+                setSettings={setSettings}
+                darkMode={darkMode}
+                setDarkMode={setDarkMode}
+                sound={activeSound}
+                onSoundChange={playSound}
+                volume={volume}
+                onVolumeChange={updateVolume}
+                onClearData={clearData}
+              />
+            </div>
+          )}
+        </div>
+
+        {/* ── Footer ───────────────────── */}
+        <footer className={clsx('mt-8 text-center text-xs', darkMode ? 'text-white/10' : 'text-surface-200')}>
+          DeepFocus — built for deep work. All data stays on your device.
+        </footer>
+      </div>
+    </div>
+  )
+}

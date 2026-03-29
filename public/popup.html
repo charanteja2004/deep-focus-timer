@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>DeepFocus — Floating Timer</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: #0d1117;
+      color: #fff;
+      width: 220px;
+      height: 110px;
+      overflow: hidden;
+      user-select: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .card {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 0 16px;
+      background: #0d1117;
+      border-bottom: 1px solid rgba(255,255,255,0.07);
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      transition: background 0.3s;
+    }
+    .dot.focus       { background: #4d6ef5; }
+    .dot.short_break { background: #10b981; }
+    .dot.long_break  { background: #8b5cf6; }
+    .dot.running     { animation: blink 2s ease-in-out infinite; }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.3; }
+    }
+
+    .info {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .time {
+      font-size: 28px;
+      font-weight: 300;
+      letter-spacing: -1px;
+      font-variant-numeric: tabular-nums;
+      line-height: 1;
+    }
+
+    .phase-label {
+      font-size: 10px;
+      color: rgba(255,255,255,0.35);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .controls {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    button {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 8px;
+      cursor: pointer;
+      color: rgba(255,255,255,0.6);
+      width: 30px;
+      height: 30px;
+      transition: background 0.15s, color 0.15s;
+      padding: 0;
+    }
+    button:hover { background: rgba(255,255,255,0.12); color: #fff; }
+    button:active { transform: scale(0.93); }
+
+    button svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+    .btn-primary {
+      background: #4d6ef5;
+      border-color: transparent;
+      color: #fff;
+    }
+    .btn-primary:hover { background: #6281ff; }
+
+    #task-label {
+      font-size: 10px;
+      color: rgba(255,255,255,0.25);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 130px;
+      margin-top: 1px;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="dot focus" id="dot"></div>
+
+    <div class="info">
+      <div class="time" id="time">25:00</div>
+      <div class="phase-label" id="phase">Focus</div>
+      <div id="task-label"></div>
+    </div>
+
+    <div class="controls">
+      <!-- Play / Pause -->
+      <button id="btn-playpause" class="btn-primary" title="Play / Pause">
+        <svg id="icon-play" viewBox="0 0 24 24"><polygon points="5,3 19,12 5,21"/></svg>
+        <svg id="icon-pause" viewBox="0 0 24 24" style="display:none"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+      </button>
+
+      <!-- Distraction -->
+      <button id="btn-distract" title="Log distraction" style="font-size:14px; background:rgba(249,115,22,0.12); border-color:rgba(249,115,22,0.2); color:rgba(249,115,22,0.7);">
+        ⚡
+      </button>
+    </div>
+  </div>
+
+  <script>
+    const bc = new BroadcastChannel('deepfocus_timer');
+
+    let state = {
+      timeLeft: 1500,
+      phase: 'focus',
+      running: false,
+      activeTask: null,
+    };
+
+    const PHASE_LABELS = {
+      focus: 'Focus',
+      short_break: 'Short Break',
+      long_break: 'Long Break',
+    };
+
+    function pad(n) { return String(n).padStart(2, '0'); }
+    function fmt(s) { return `${pad(Math.floor(s/60))}:${pad(s%60)}`; }
+
+    function render() {
+      document.getElementById('time').textContent  = fmt(state.timeLeft);
+      document.getElementById('phase').textContent = PHASE_LABELS[state.phase] || state.phase;
+
+      const dot = document.getElementById('dot');
+      dot.className = 'dot ' + state.phase + (state.running ? ' running' : '');
+
+      document.getElementById('icon-play').style.display  = state.running ? 'none' : '';
+      document.getElementById('icon-pause').style.display = state.running ? '' : 'none';
+
+      const taskEl = document.getElementById('task-label');
+      taskEl.textContent = state.activeTask ? state.activeTask.text : '';
+
+      document.title = `${fmt(state.timeLeft)} — ${PHASE_LABELS[state.phase] || ''}`;
+    }
+
+    // Receive state from main window
+    bc.onmessage = (e) => {
+      if (e.data.type === 'state') {
+        state = { ...state, ...e.data.payload };
+        render();
+      }
+    };
+
+    // Send commands back to main window
+    document.getElementById('btn-playpause').addEventListener('click', () => {
+      bc.postMessage({ type: 'command', cmd: state.running ? 'pause' : 'play' });
+    });
+
+    document.getElementById('btn-distract').addEventListener('click', () => {
+      bc.postMessage({ type: 'command', cmd: 'distraction' });
+    });
+
+    // Request initial state
+    bc.postMessage({ type: 'request_state' });
+
+    render();
+  </script>
+</body>
+</html>
