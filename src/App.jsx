@@ -1,11 +1,12 @@
 /**
  * App.jsx — DeepFocus Pomodoro Application
  *
- * Fixes applied:
- * 1. Browser Fullscreen API for Deep Focus (icon changes to "exit fullscreen")
- * 2. window.open() popup for Floating Timer (real detached window, works across tabs)
- * 3. BroadcastChannel to sync timer state with popup window
- * 4. DeepFocusMode has solid opaque background, no transparency
+ * Features:
+ * 1. Browser Fullscreen API for Deep Focus (icon swaps to exit icon when active)
+ * 2. window.open() popup timer — real detached window via BroadcastChannel
+ * 3. Partial session recording on reset/skip (>30s)
+ * 4. Seed demo data to populate analytics immediately
+ * 5. Full calendar heatmap, every day from first session
  */
 
 import React, { useState, useEffect, useCallback, useRef } from 'react'
@@ -17,6 +18,7 @@ import { useStorage } from './hooks/useStorage'
 import { useAnalytics } from './hooks/useAnalytics'
 import { useAmbientSound } from './hooks/useAmbientSound'
 import { useNotifications } from './hooks/useNotifications'
+import { generateSeedSessions } from './utils/seedData'
 
 // Components
 import CircularTimer from './components/CircularTimer'
@@ -270,6 +272,17 @@ export default function App() {
   // ── Helpers ───────────────────────────────────────────
   const activeTask   = tasks.find(t => t.id === activeTaskId) || null
   const clearData    = () => { setSessions([]); setTasks([]); setActiveTaskId(null); reset() }
+
+  // Load 30-day demo sessions (merges with existing)
+  const handleSeedData = () => {
+    const demo = generateSeedSessions(30)
+    setSessions(prev => {
+      // Avoid duplicate timestamps
+      const existingTs = new Set(prev.map(s => s.completedAt))
+      const fresh = demo.filter(s => !existingTs.has(s.completedAt))
+      return [...prev, ...fresh].sort((a, b) => a.completedAt - b.completedAt)
+    })
+  }
 
   const handlePrimary = () => {
     if (running) pause()
@@ -597,7 +610,11 @@ export default function App() {
           {tab === 'analytics' && (
             <div className={clsx('rounded-2xl border p-5', darkMode ? 'bg-white/3 border-white/6' : 'bg-white border-surface-100 shadow-sm')}>
               <h2 className={clsx('text-sm font-semibold mb-6', darkMode ? 'text-white/70' : 'text-surface-600')}>Focus Analytics</h2>
-              <AnalyticsDashboard sessions={sessions} />
+              <AnalyticsDashboard
+                sessions={sessions}
+                onSeedData={handleSeedData}
+                onClearData={clearData}
+              />
             </div>
           )}
 
