@@ -2,11 +2,11 @@
  * App.jsx — DeepFocus Pomodoro Application
  *
  * Features:
- * 1. Browser Fullscreen API for Deep Focus (icon swaps to exit icon when active)
- * 2. window.open() popup timer — real detached window via BroadcastChannel
- * 3. Partial session recording on reset/skip (>30s)
- * 4. Seed demo data to populate analytics immediately
- * 5. Full calendar heatmap, every day from first session
+ * 1. Browser Fullscreen API for Deep Focus (icon swaps to exit when active)
+ * 2. Document Picture-in-Picture floating timer (true always-on-top OS window)
+ * 3. Web Worker timer — never pauses in background tabs
+ * 4. Partial session recording on reset/skip (>30s)
+ * 5. Seed demo data + full calendar heatmap
  */
 
 import React, { useState, useEffect, useCallback, useRef } from 'react'
@@ -18,7 +18,10 @@ import { useStorage } from './hooks/useStorage'
 import { useAnalytics } from './hooks/useAnalytics'
 import { useAmbientSound } from './hooks/useAmbientSound'
 import { useNotifications } from './hooks/useNotifications'
+import { usePiPTimer }       from './hooks/usePiPTimer'
 import { generateSeedSessions } from './utils/seedData'
+
+import FloatingTimerContent from './components/FloatingTimerContent'
 
 // Components
 import CircularTimer from './components/CircularTimer'
@@ -66,42 +69,21 @@ export default function App() {
   const [tab,            setTab]            = useState('timer')
   const [deepFocus,      setDeepFocus]      = useState(false)
   const [isFullscreen,   setIsFullscreen]   = useState(false)
-  const [popupOpen,      setPopupOpen]      = useState(false)
   const [showSuggestion, setShowSuggestion] = useState(false)
-  const popupWindowRef = useRef(null)
-  const bcRef          = useRef(null)
+
+  // ── Document Picture-in-Picture (floating timer) ──────
+  const pip = usePiPTimer()
 
   // ── Apply theme ──────────────────────────────────────
   useEffect(() => {
     document.documentElement.classList.toggle('dark', darkMode)
   }, [darkMode])
 
-  // ── BroadcastChannel setup ───────────────────────────
-  useEffect(() => {
-    bcRef.current = new BroadcastChannel('deepfocus_timer')
-
-    bcRef.current.onmessage = (e) => {
-      const { type, cmd } = e.data
-      if (type === 'command') {
-        if      (cmd === 'play')        { if (elapsedRef.current > 0) resumeRef.current() ; else startRef.current() }
-        else if (cmd === 'pause')       { pauseRef.current() }
-        else if (cmd === 'distraction') { logDistractionRef.current() }
-      }
-      if (type === 'request_state') {
-        broadcastState()
-      }
-    }
-
-    return () => { bcRef.current?.close() }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
   // ── Track browser fullscreen state ───────────────────
   useEffect(() => {
     const handleFSChange = () => {
       const isFull = !!document.fullscreenElement
       setIsFullscreen(isFull)
-      // If user pressed ESC to exit fullscreen, also exit our deep focus UI
       if (!isFull && deepFocus) setDeepFocus(false)
     }
     document.addEventListener('fullscreenchange', handleFSChange)
@@ -112,91 +94,17 @@ export default function App() {
   const enterDeepFocus = useCallback(async () => {
     setDeepFocus(true)
     try {
-      if (!document.fullscreenElement) {
+      if (!document.fullscreenElement)
         await document.documentElement.requestFullscreen()
-      }
-    } catch { /* fullscreen not supported */ }
+    } catch { /* not supported */ }
   }, [])
 
   const exitDeepFocus = useCallback(async () => {
     setDeepFocus(false)
     try {
-      if (document.fullscreenElement) {
-        await document.exitFullscreen()
-      }
+      if (document.fullscreenElement) await document.exitFullscreen()
     } catch { /* ignore */ }
   }, [])
-
-  // ── Popup window management ───────────────────────────
-  const openPopup = useCallback(() => {
-    // Close existing popup if any
-    if (popupWindowRef.current && !popupWindowRef.current.closed) {
-      popupWindowRef.current.focus()
-      return
-    }
-
-    const w = 240, h = 120
-    const left = window.screen.width - w - 20
-    const top  = window.screen.height - h - 60
-
-    const popup = window.open(
-      '/popup.html',
-      'deepfocus_popup',
-      `width=${w},height=${h},left=${left},top=${top},resizable=no,toolbar=no,menubar=no,scrollbars=no,status=no,location=no`
-    )
-
-    if (!popup) {
-      alert('Popup blocked! Please allow popups for this site.')
-      return
-    }
-
-    popupWindowRef.current = popup
-    setPopupOpen(true)
-
-    // Broadcast state as soon as popup requests it (it may request after load)
-    // Also proactively send after a short delay
-    setTimeout(() => broadcastState(), 600)
-
-    // Poll for popup close
-    const pollClose = setInterval(() => {
-      if (popup.closed) {
-        clearInterval(pollClose)
-        setPopupOpen(false)
-        popupWindowRef.current = null
-      }
-    }, 500)
-  }, [])  // eslint-disable-line
-
-  const closePopup = useCallback(() => {
-    if (popupWindowRef.current && !popupWindowRef.current.closed) {
-      popupWindowRef.current.close()
-    }
-    popupWindowRef.current = null
-    setPopupOpen(false)
-  }, [])
-
-  const togglePopup = useCallback(() => {
-    if (popupOpen && popupWindowRef.current && !popupWindowRef.current.closed) {
-      closePopup()
-    } else {
-      openPopup()
-    }
-  }, [popupOpen, openPopup, closePopup])
-
-  // ── Broadcast timer state to popup ────────────────────
-  const broadcastState = useCallback(() => {
-    if (!bcRef.current) return
-    const activeTask = tasks.find(t => t.id === activeTaskId) || null
-    bcRef.current.postMessage({
-      type: 'state',
-      payload: {
-        timeLeft: timerStateRef.current.timeLeft,
-        phase:    timerStateRef.current.phase,
-        running:  timerStateRef.current.running,
-        activeTask,
-      },
-    })
-  }, [tasks, activeTaskId])   // eslint-disable-line
 
   // ── Session complete ──────────────────────────────────
   const handleSessionComplete = useCallback((sessionData) => {
@@ -205,33 +113,90 @@ export default function App() {
     setTimeout(() => setShowSuggestion(false), 8000)
   }, [setSessions])
 
+  // ── Phase transition: notification + ding sound ───────
+  // Called by useTimer whenever a phase ends (focus→break or break→focus)
+  const handlePhaseComplete = useCallback(({ completedPhase, nextPhase, autoStarting }) => {
+    const isNowBreak = nextPhase !== PHASES.FOCUS
+
+    // 1. Browser push notification
+    const title = isNowBreak
+      ? (nextPhase === PHASES.LONG_BREAK ? '🎉 Long Break Time!' : '☕ Short Break Time!')
+      : '🎯 Focus Time!'
+    const body = isNowBreak
+      ? `Great work! ${autoStarting ? 'Break starting now.' : 'Take a well-earned break.'}`
+      : `Break's over. ${autoStarting ? 'Focus session starting now.' : "Let's get back to it!"}`
+
+    if ('Notification' in window && Notification.permission === 'granted') {
+      const n = new Notification(title, {
+        body,
+        icon:   '/favicon.svg',
+        badge:  '/favicon.svg',
+        silent: false,
+      })
+      setTimeout(() => n.close(), 8000)
+    }
+
+    // 2. Audible ding — three chime pulses (~3 seconds) via Web Audio API
+    try {
+      const ctx  = new (window.AudioContext || window.webkitAudioContext)()
+      const gain = ctx.createGain()
+      gain.connect(ctx.destination)
+
+      // Play 3 pulses, each separated by ~0.3s gap
+      const PULSE_DURATION = 0.7   // each tone lasts 0.7s
+      const PULSE_GAP      = 0.3   // gap between pulses
+      const NUM_PULSES     = 3
+
+      for (let i = 0; i < NUM_PULSES; i++) {
+        const t0 = ctx.currentTime + i * (PULSE_DURATION + PULSE_GAP)
+        const osc = ctx.createOscillator()
+        osc.connect(gain)
+        osc.type = 'sine'
+
+        if (isNowBreak) {
+          // Descending → break (relaxing)
+          osc.frequency.setValueAtTime(880, t0)
+          osc.frequency.setValueAtTime(660, t0 + 0.25)
+        } else {
+          // Ascending → focus (energising)
+          osc.frequency.setValueAtTime(660, t0)
+          osc.frequency.setValueAtTime(880, t0 + 0.25)
+        }
+
+        gain.gain.setValueAtTime(0.0,  t0)
+        gain.gain.linearRampToValueAtTime(0.35, t0 + 0.05)
+        gain.gain.linearRampToValueAtTime(0.0,  t0 + PULSE_DURATION)
+
+        osc.start(t0)
+        osc.stop(t0 + PULSE_DURATION)
+        if (i === NUM_PULSES - 1) osc.onended = () => ctx.close()
+      }
+    } catch { /* Audio not supported — silently skip */ }
+  }, [])
+
   // ── Timer hook ────────────────────────────────────────
   const mergedSettings = { ...DEFAULT_SETTINGS, ...settings }
   const {
     phase, timeLeft, running, sessionCount,
     distractions, pauses, progress, elapsedSeconds,
     start, pause, resume, reset, skipPhase, logDistraction, setPhaseManual,
-  } = useTimer(mergedSettings, handleSessionComplete)
+  } = useTimer(mergedSettings, handleSessionComplete, handlePhaseComplete)
 
-  // Keep stable refs for BroadcastChannel handler
-  const elapsedRef         = useRef(elapsedSeconds)
-  const startRef           = useRef(start)
-  const resumeRef          = useRef(resume)
-  const pauseRef           = useRef(pause)
-  const logDistractionRef  = useRef(logDistraction)
-  const timerStateRef      = useRef({ timeLeft, phase, running })
-
-  useEffect(() => { elapsedRef.current = elapsedSeconds },   [elapsedSeconds])
-  useEffect(() => { startRef.current   = start },            [start])
-  useEffect(() => { resumeRef.current  = resume },           [resume])
-  useEffect(() => { pauseRef.current   = pause },            [pause])
-  useEffect(() => { logDistractionRef.current = logDistraction }, [logDistraction])
-  useEffect(() => { timerStateRef.current = { timeLeft, phase, running } }, [timeLeft, phase, running])
-
-  // Broadcast on every tick when popup is open
+  // ── Update PiP window on every timer tick ─────────────
   useEffect(() => {
-    if (popupOpen) broadcastState()
-  }, [timeLeft, running, phase, popupOpen, broadcastState])
+    if (!pip.isOpen) return
+    pip.renderContent(
+      <FloatingTimerContent
+        timeLeft={timeLeft}
+        phase={phase}
+        running={running}
+        elapsedSeconds={elapsedSeconds}
+        onPlay={() => { if (elapsedSeconds > 0) resume(); else start() }}
+        onPause={pause}
+        onDistraction={logDistraction}
+      />
+    )
+  }, [pip.isOpen, timeLeft, phase, running, elapsedSeconds])
 
   // ── Analytics ─────────────────────────────────────────
   const stats = useAnalytics(sessions)
@@ -356,14 +321,22 @@ export default function App() {
               {darkMode ? <Sun size={15} /> : <Moon size={15} />}
             </button>
 
-            {/* Floating popup toggle */}
+            {/* Picture-in-Picture floating timer */}
             <button
-              id="header-popup"
-              onClick={togglePopup}
-              title={popupOpen ? 'Close floating timer' : 'Open floating timer (stays on top)'}
+              id="header-pip"
+              onClick={pip.isOpen ? pip.close : pip.open}
+              title={
+                !pip.isSupported
+                  ? 'Floating timer requires Chrome 116+'
+                  : pip.isOpen
+                  ? 'Close floating timer'
+                  : 'Float timer above all apps (PiP)'
+              }
+              disabled={!pip.isSupported}
               className={clsx(
                 'p-2 rounded-xl transition-all',
-                popupOpen
+                !pip.isSupported && 'opacity-30 cursor-not-allowed',
+                pip.isOpen
                   ? 'text-brand-400 bg-brand-500/10 border border-brand-500/20'
                   : darkMode
                     ? 'text-white/40 hover:text-white/80 hover:bg-white/5'

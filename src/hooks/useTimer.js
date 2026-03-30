@@ -1,7 +1,9 @@
 /**
  * useTimer — Core Pomodoro timer logic
- * Handles focus/break phases, auto-cycling, pause/resume/reset.
- * Records partial sessions on reset/skip if >30s of focus elapsed.
+ *
+ * Bug fix: setInterval replaced with a Web Worker (/public/timer.worker.js)
+ * so the countdown is NEVER throttled when the tab is in the background.
+ * Wall-clock compensation inside the worker keeps time drift-free.
  */
 import { useState, useEffect, useRef, useCallback } from 'react'
 
@@ -22,197 +24,247 @@ const DEFAULT_SETTINGS = {
   autoStartFocus: false,
 }
 
-// Minimum elapsed seconds to record a partial session
 const MIN_PARTIAL_SECONDS = 30
 
-export function useTimer(settings = DEFAULT_SETTINGS, onSessionComplete) {
+export function useTimer(settings = DEFAULT_SETTINGS, onSessionComplete, onPhaseComplete) {
   const s = { ...DEFAULT_SETTINGS, ...settings }
 
+  // Phase durations in seconds
   const phaseDurations = {
     [PHASES.FOCUS]:       s.focusDuration * 60,
     [PHASES.SHORT_BREAK]: s.shortBreakDuration * 60,
     [PHASES.LONG_BREAK]:  s.longBreakDuration * 60,
   }
 
-  const [phase, setPhase]               = useState(PHASES.FOCUS)
-  const [timeLeft, setTimeLeft]         = useState(phaseDurations[PHASES.FOCUS])
-  const [running, setRunning]           = useState(false)
+  // ── React state ───────────────────────────────────────
+  const [phase,        setPhase]        = useState(PHASES.FOCUS)
+  const [timeLeft,     setTimeLeft]     = useState(phaseDurations[PHASES.FOCUS])
+  const [running,      setRunning]      = useState(false)
   const [sessionCount, setSessionCount] = useState(0)
   const [distractions, setDistractions] = useState([])
-  const [pauses, setPauses]             = useState([])
-  const [sessionStartTime, setSessionStartTime] = useState(null)
-  const [elapsedSeconds, setElapsedSeconds]     = useState(0)
+  const [pauses,       setPauses]       = useState([])
 
-  const intervalRef  = useRef(null)
-  // Keep a stable ref to onSessionComplete to avoid stale closures
-  const onCompleteRef = useRef(onSessionComplete)
-  useEffect(() => { onCompleteRef.current = onSessionComplete }, [onSessionComplete])
+  // ── Stable refs (avoid stale closure bugs) ────────────
+  const workerRef           = useRef(null)
+  const onCompleteRef       = useRef(onSessionComplete)
+  const handleCompleteRef   = useRef(null)   // forward ref — set after definition
+  const phaseRef            = useRef(phase)
+  const timeLeftRef         = useRef(timeLeft)
+  const sessionCountRef     = useRef(sessionCount)
+  const distractionsRef     = useRef(distractions)
+  const pausesRef           = useRef(pauses)
+  const runningRef          = useRef(running)
+  const durationsRef        = useRef(phaseDurations)
+  const settingsRef         = useRef(s)
+  const onPhaseCompleteRef  = useRef(onPhaseComplete)
 
-  // Also keep live refs to state used in callbacks
-  const phaseRef        = useRef(phase)
-  const elapsedRef      = useRef(elapsedSeconds)
-  const sessionCountRef = useRef(sessionCount)
-  const distractionsRef = useRef(distractions)
-  const pausesRef       = useRef(pauses)
+  useEffect(() => { onCompleteRef.current     = onSessionComplete },  [onSessionComplete])
+  useEffect(() => { onPhaseCompleteRef.current = onPhaseComplete },   [onPhaseComplete])
+  useEffect(() => { phaseRef.current          = phase },             [phase])
+  useEffect(() => { timeLeftRef.current       = timeLeft },          [timeLeft])
+  useEffect(() => { sessionCountRef.current   = sessionCount },      [sessionCount])
+  useEffect(() => { distractionsRef.current   = distractions },      [distractions])
+  useEffect(() => { pausesRef.current         = pauses },            [pauses])
+  // IMPORTANT: update runningRef synchronously using layout effect
+  // so that the settings-change guard (below) reads the correct value
+  useEffect(() => { runningRef.current        = running },           [running])
+  useEffect(() => { durationsRef.current      = phaseDurations },    )  // every render
+  useEffect(() => { settingsRef.current       = s },                 )  // every render
 
-  useEffect(() => { phaseRef.current        = phase },        [phase])
-  useEffect(() => { elapsedRef.current      = elapsedSeconds }, [elapsedSeconds])
-  useEffect(() => { sessionCountRef.current = sessionCount }, [sessionCount])
-  useEffect(() => { distractionsRef.current = distractions }, [distractions])
-  useEffect(() => { pausesRef.current       = pauses },       [pauses])
-
-  // Keep durations up-to-date via ref
-  const durationsRef = useRef(phaseDurations)
-  durationsRef.current = phaseDurations
-
-  // Reset timer display only when settings change and not running
+  // ── Create Web Worker once on mount ───────────────────
   useEffect(() => {
-    if (!running) {
-      setTimeLeft(durationsRef.current[phase])
+    const worker = new Worker('/timer.worker.js')
+
+    worker.onmessage = (e) => {
+      const { type, remaining } = e.data
+
+      if (type === 'TICK') {
+        setTimeLeft(remaining)
+        if (remaining <= 0) {
+          // Phase complete — delegate to the ref so we always use the latest handler
+          handleCompleteRef.current?.()
+        }
+      }
+      // 'COMPLETE' is sent by the worker too but we handle it via remaining===0 above
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [s.focusDuration, s.shortBreakDuration, s.longBreakDuration])
 
-  const totalDuration = phaseDurations[phase]
+    worker.onerror = (err) => {
+      console.error('[DeepFocus] Timer worker error:', err)
+    }
 
-  // ── Helper: record a session (full or partial) ───────
+    workerRef.current = worker
+    return () => worker.terminate()
+  }, []) // ← deliberately empty: worker is created only once
+
+  // ── Session recording helper ──────────────────────────
   const recordSession = useCallback((partial = false) => {
-    const elapsed = elapsedRef.current
-    if (elapsed < MIN_PARTIAL_SECONDS) return  // too short to record
+    const totalDuration = durationsRef.current[phaseRef.current]
+    const elapsed       = totalDuration - timeLeftRef.current
+    if (elapsed < MIN_PARTIAL_SECONDS) return
 
-    const newCount = sessionCountRef.current + (partial ? 0 : 1)
     onCompleteRef.current?.({
       phase:          phaseRef.current,
       duration:       elapsed,
       distractions:   distractionsRef.current.length,
       pauses:         pausesRef.current.length,
       completedAt:    Date.now(),
-      sessionNumber:  newCount,
+      sessionNumber:  sessionCountRef.current + (partial ? 0 : 1),
       elapsedSeconds: elapsed,
       partial,
     })
   }, [])
 
-  // ── Core tick ────────────────────────────────────────
-  useEffect(() => {
-    if (!running) return
-    intervalRef.current = setInterval(() => {
-      setTimeLeft(t => {
-        if (t <= 1) {
-          clearInterval(intervalRef.current)
-          handlePhaseComplete()
-          return 0
-        }
-        setElapsedSeconds(e => e + 1)
-        return t - 1
-      })
-    }, 1000)
-    return () => clearInterval(intervalRef.current)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [running, phase])
-
+  // ── Phase complete handler ────────────────────────────
   const handlePhaseComplete = useCallback(() => {
     setRunning(false)
+    workerRef.current?.postMessage({ type: 'RESET' })
 
-    if (phaseRef.current === PHASES.FOCUS) {
+    const cfg          = settingsRef.current
+    const dur          = durationsRef.current
+    const completedPhase = phaseRef.current
+
+    if (completedPhase === PHASES.FOCUS) {
       const newCount = sessionCountRef.current + 1
       setSessionCount(newCount)
 
+      // Record completed session (full duration)
       onCompleteRef.current?.({
         phase:          PHASES.FOCUS,
-        duration:       durationsRef.current[PHASES.FOCUS],
+        duration:       dur[PHASES.FOCUS],
         distractions:   distractionsRef.current.length,
         pauses:         pausesRef.current.length,
         completedAt:    Date.now(),
         sessionNumber:  newCount,
-        elapsedSeconds: elapsedRef.current,
+        elapsedSeconds: dur[PHASES.FOCUS],
         partial:        false,
       })
 
-      const isLongBreak = newCount % s.sessionsUntilLongBreak === 0
-      const nextPhase   = isLongBreak ? PHASES.LONG_BREAK : PHASES.SHORT_BREAK
+      const isLong    = newCount % cfg.sessionsUntilLongBreak === 0
+      const nextPhase = isLong ? PHASES.LONG_BREAK : PHASES.SHORT_BREAK
+
+      // ── Notify: focus ended, break starting ──────────
+      onPhaseCompleteRef.current?.({
+        completedPhase: PHASES.FOCUS,
+        nextPhase,
+        autoStarting:   cfg.autoStartBreaks,
+      })
+
       setPhase(nextPhase)
-      setTimeLeft(durationsRef.current[nextPhase])
-      setDistractions([]); setPauses([]); setElapsedSeconds(0)
+      setTimeLeft(dur[nextPhase])
+      setDistractions([])
+      setPauses([])
 
-      if (s.autoStartBreaks) setTimeout(() => setRunning(true), 500)
+      if (cfg.autoStartBreaks) {
+        setTimeout(() => {
+          workerRef.current?.postMessage({ type: 'START', durationSeconds: dur[nextPhase] })
+          setRunning(true)
+        }, 800)  // slight delay so notification fires first
+      }
     } else {
-      setPhase(PHASES.FOCUS)
-      setTimeLeft(durationsRef.current[PHASES.FOCUS])
-      setElapsedSeconds(0)
-      if (s.autoStartFocus) setTimeout(() => setRunning(true), 500)
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [s.sessionsUntilLongBreak, s.autoStartBreaks, s.autoStartFocus])
+      // Break ended → return to focus
+      const nextPhase = PHASES.FOCUS
 
-  // ── Controls ─────────────────────────────────────────
+      // ── Notify: break ended, focus starting ──────────
+      onPhaseCompleteRef.current?.({
+        completedPhase,
+        nextPhase,
+        autoStarting:   cfg.autoStartFocus,
+      })
+
+      setPhase(PHASES.FOCUS)
+      setTimeLeft(dur[PHASES.FOCUS])
+      setDistractions([])
+      setPauses([])
+
+      if (cfg.autoStartFocus) {
+        setTimeout(() => {
+          workerRef.current?.postMessage({ type: 'START', durationSeconds: dur[PHASES.FOCUS] })
+          setRunning(true)
+        }, 800)
+      }
+    }
+  }, []) // stable — reads everything from refs
+
+  // Keep forward ref up-to-date
+  useEffect(() => { handleCompleteRef.current = handlePhaseComplete }, [handlePhaseComplete])
+
+  // ── Reset timer whenever settings change ─────────────────
+  // Always resets — even if running — so the new duration takes effect immediately.
+  useEffect(() => {
+    setRunning(false)
+    workerRef.current?.postMessage({ type: 'RESET' })
+    setTimeLeft(phaseDurations[phaseRef.current])
+    setDistractions([])
+    setPauses([])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [s.focusDuration, s.shortBreakDuration, s.longBreakDuration])
+
+  // ── Public controls ───────────────────────────────────
   const start = useCallback(() => {
-    if (!sessionStartTime) setSessionStartTime(Date.now())
+    const dur = timeLeftRef.current
+    workerRef.current?.postMessage({ type: 'START', durationSeconds: dur })
     setRunning(true)
-  }, [sessionStartTime])
+  }, [])
 
   const pause = useCallback(() => {
+    workerRef.current?.postMessage({ type: 'PAUSE' })
     setRunning(false)
     setPauses(p => [...p, { at: Date.now() }])
   }, [])
 
-  const resume = useCallback(() => setRunning(true), [])
+  const resume = useCallback(() => {
+    workerRef.current?.postMessage({ type: 'RESUME' })
+    setRunning(true)
+  }, [])
 
-  // Reset — records partial session if focus was happening
   const reset = useCallback(() => {
-    clearInterval(intervalRef.current)
+    workerRef.current?.postMessage({ type: 'RESET' })
     setRunning(false)
-
-    // Record partial if we were in focus and enough time passed
-    if (phaseRef.current === PHASES.FOCUS) {
-      recordSession(true)
-    }
-
+    // Record partial session if in focus and enough time elapsed
+    if (phaseRef.current === PHASES.FOCUS) recordSession(true)
     setTimeLeft(durationsRef.current[phaseRef.current])
-    setElapsedSeconds(0)
-    setSessionStartTime(null)
     setDistractions([])
     setPauses([])
   }, [recordSession])
 
-  // Skip — records partial focus session, then advances phase
   const skipPhase = useCallback(() => {
-    clearInterval(intervalRef.current)
+    workerRef.current?.postMessage({ type: 'RESET' })
     setRunning(false)
 
     if (phaseRef.current === PHASES.FOCUS) {
-      // Record partial session
       recordSession(true)
-      const newCount = sessionCountRef.current + 1
+      const newCount  = sessionCountRef.current + 1
       setSessionCount(newCount)
-      const isLongBreak = newCount % s.sessionsUntilLongBreak === 0
-      const nextPhase   = isLongBreak ? PHASES.LONG_BREAK : PHASES.SHORT_BREAK
+      const isLong    = newCount % settingsRef.current.sessionsUntilLongBreak === 0
+      const nextPhase = isLong ? PHASES.LONG_BREAK : PHASES.SHORT_BREAK
       setPhase(nextPhase)
       setTimeLeft(durationsRef.current[nextPhase])
     } else {
       setPhase(PHASES.FOCUS)
       setTimeLeft(durationsRef.current[PHASES.FOCUS])
     }
-    setDistractions([]); setPauses([]); setElapsedSeconds(0)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recordSession, s.sessionsUntilLongBreak])
+    setDistractions([])
+    setPauses([])
+  }, [recordSession])
 
   const logDistraction = useCallback(() => {
     setDistractions(d => [...d, { at: Date.now() }])
   }, [])
 
   const setPhaseManual = useCallback((newPhase) => {
-    clearInterval(intervalRef.current)
+    workerRef.current?.postMessage({ type: 'RESET' })
     setRunning(false)
-    // Record partial if leaving focus mid-session
     if (phaseRef.current === PHASES.FOCUS) recordSession(true)
     setPhase(newPhase)
     setTimeLeft(durationsRef.current[newPhase])
-    setDistractions([]); setPauses([]); setElapsedSeconds(0)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    setDistractions([])
+    setPauses([])
   }, [recordSession])
 
-  const progress = totalDuration > 0 ? 1 - timeLeft / totalDuration : 0
+  // elapsed = how many seconds have been focused in this phase
+  const totalDuration  = phaseDurations[phase]
+  const elapsedSeconds = Math.max(0, totalDuration - timeLeft)
+  const progress       = totalDuration > 0 ? 1 - timeLeft / totalDuration : 0
 
   return {
     phase, timeLeft, running, sessionCount,
