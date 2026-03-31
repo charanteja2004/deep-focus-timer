@@ -1,9 +1,10 @@
 /**
- * SettingsPanel — Timer durations, theme, sound preferences
+ * SettingsPanel — Timer durations, theme, sound, daily goal, projects
  */
 import React from 'react'
 import { Moon, Sun, Volume2, VolumeX, RotateCcw } from 'lucide-react'
 import { SOUNDS } from '../hooks/useAmbientSound'
+import ProjectManager from './ProjectManager'
 import clsx from 'clsx'
 
 const PRESET_DURATIONS = [
@@ -17,6 +18,8 @@ export default function SettingsPanel({
   darkMode, setDarkMode,
   sound, onSoundChange, volume, onVolumeChange,
   onClearData,
+  goals, onGoalChange,
+  projects, onProjectsChange,
 }) {
   const update = (key) => (value) =>
     setSettings(prev => ({ ...prev, [key]: value }))
@@ -24,7 +27,34 @@ export default function SettingsPanel({
   return (
     <div className="flex flex-col gap-8 animate-fade-in pb-8">
 
-      {/* ── Timer durations ──────────────────────────── */}
+      {/* ── Daily Goal ────────────────────────────────── */}
+      <Section title="Daily Focus Goal">
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-white/60">Today's goal</p>
+            <span className="text-sm font-mono text-white/80">
+              {goals.dailyGoalMinutes >= 60
+                ? `${Math.floor(goals.dailyGoalMinutes / 60)}h ${goals.dailyGoalMinutes % 60 > 0 ? `${goals.dailyGoalMinutes % 60}m` : ''}`
+                : `${goals.dailyGoalMinutes}m`}
+            </span>
+          </div>
+          <input
+            id="slider-daily-goal"
+            type="range" min={30} max={480} step={30}
+            value={goals.dailyGoalMinutes}
+            onChange={e => onGoalChange({ dailyGoalMinutes: Number(e.target.value) })}
+            className="w-full h-1 bg-white/10 accent-brand-500"
+            style={{ accentColor: '#4d6ef5' }}
+          />
+          <div className="flex justify-between text-xs text-white/20">
+            <span>30m</span>
+            <span>4h</span>
+            <span>8h</span>
+          </div>
+        </div>
+      </Section>
+
+      {/* ── Timer durations ───────────────────────────── */}
       <Section title="Focus Duration">
         <div className="flex gap-2 mb-4">
           {PRESET_DURATIONS.map(p => (
@@ -95,7 +125,12 @@ export default function SettingsPanel({
         />
       </Section>
 
-      {/* ── Appearance ───────────────────────────────── */}
+      {/* ── Projects ──────────────────────────────────── */}
+      <Section title="Projects">
+        <ProjectManager projects={projects} onChange={onProjectsChange} />
+      </Section>
+
+      {/* ── Appearance ────────────────────────────────── */}
       <Section title="Appearance">
         <div className="flex items-center justify-between">
           <span className="text-sm text-white/60">Theme</span>
@@ -113,7 +148,7 @@ export default function SettingsPanel({
         </div>
       </Section>
 
-      {/* ── Ambient sound ────────────────────────────── */}
+      {/* ── Ambient sound ─────────────────────────────── */}
       <Section title="Ambient Sound">
         <div className="grid grid-cols-3 gap-2 mb-4">
           {Object.entries(SOUNDS).map(([key, val]) => (
@@ -146,12 +181,12 @@ export default function SettingsPanel({
         )}
       </Section>
 
-      {/* ── Danger zone ──────────────────────────────── */}
+      {/* ── Data ──────────────────────────────────────── */}
       <Section title="Data">
         <div className="flex items-center justify-between">
           <div>
             <p className="text-sm text-white/60">Clear all data</p>
-            <p className="text-xs text-white/30">Removes sessions, tasks, stats</p>
+            <p className="text-xs text-white/30">Removes sessions, tasks, XP, achievements</p>
           </div>
           <button
             id="clear-data-btn"
@@ -217,7 +252,6 @@ function ToggleRow({ label, value, onChange, id }) {
       >
         <span className={clsx(
           'absolute top-0.5 w-4 h-4 rounded-full bg-white shadow-sm transition-all duration-300',
-          value ? 'left-5.5' : 'left-0.5'
         )}
         style={{ left: value ? '22px' : '2px' }}
         />

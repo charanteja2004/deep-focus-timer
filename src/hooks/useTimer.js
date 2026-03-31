@@ -6,6 +6,9 @@
  * Wall-clock compensation inside the worker keeps time drift-free.
  */
 import { useState, useEffect, useRef, useCallback } from 'react'
+import {
+  saveTimerRunning, saveTimerPaused, clearTimerState, loadTimerState,
+} from '../data/storage'
 
 export const PHASES = { FOCUS: 'focus', SHORT_BREAK: 'short_break', LONG_BREAK: 'long_break' }
 
@@ -36,9 +39,20 @@ export function useTimer(settings = DEFAULT_SETTINGS, onSessionComplete, onPhase
     [PHASES.LONG_BREAK]:  s.longBreakDuration * 60,
   }
 
+  // ── Load persisted state (page reload safety) ───────────
+  const _saved = useRef(loadTimerState())   // read once on mount
+
+  // Determine initial values from saved state (if phase matches)
+  const savedPhase = _saved.current?.phase
+  const initPhase  = savedPhase && Object.values(PHASES).includes(savedPhase)
+    ? savedPhase : PHASES.FOCUS
+  const initTimeLeft = _saved.current?.remaining != null
+    ? _saved.current.remaining
+    : (savedPhase === PHASES.FOCUS ? s.focusDuration : s.shortBreakDuration) * 60
+
   // ── React state ───────────────────────────────────────
-  const [phase,        setPhase]        = useState(PHASES.FOCUS)
-  const [timeLeft,     setTimeLeft]     = useState(phaseDurations[PHASES.FOCUS])
+  const [phase,        setPhase]        = useState(initPhase)
+  const [timeLeft,     setTimeLeft]     = useState(initTimeLeft)
   const [running,      setRunning]      = useState(false)
   const [sessionCount, setSessionCount] = useState(0)
   const [distractions, setDistractions] = useState([])
@@ -93,6 +107,17 @@ export function useTimer(settings = DEFAULT_SETTINGS, onSessionComplete, onPhase
     }
 
     workerRef.current = worker
+
+    // ── Restore persisted session on mount ─────────────
+    const saved = _saved.current
+    if (saved && saved.remaining > 5) {
+      setTimeLeft(saved.remaining)
+      if (saved.shouldResume) {
+        worker.postMessage({ type: 'START', durationSeconds: saved.remaining })
+        setRunning(true)
+      }
+    }
+
     return () => worker.terminate()
   }, []) // ← deliberately empty: worker is created only once
 
@@ -204,23 +229,27 @@ export function useTimer(settings = DEFAULT_SETTINGS, onSessionComplete, onPhase
     const dur = timeLeftRef.current
     workerRef.current?.postMessage({ type: 'START', durationSeconds: dur })
     setRunning(true)
+    saveTimerRunning(phaseRef.current, dur)       // persist
   }, [])
 
   const pause = useCallback(() => {
     workerRef.current?.postMessage({ type: 'PAUSE' })
     setRunning(false)
     setPauses(p => [...p, { at: Date.now() }])
+    saveTimerPaused(phaseRef.current, timeLeftRef.current)  // persist
   }, [])
 
   const resume = useCallback(() => {
+    const remaining = timeLeftRef.current
     workerRef.current?.postMessage({ type: 'RESUME' })
     setRunning(true)
+    saveTimerRunning(phaseRef.current, remaining)  // persist (restart wall clock)
   }, [])
 
   const reset = useCallback(() => {
     workerRef.current?.postMessage({ type: 'RESET' })
     setRunning(false)
-    // Record partial session if in focus and enough time elapsed
+    clearTimerState()                                     // clear persistence
     if (phaseRef.current === PHASES.FOCUS) recordSession(true)
     setTimeLeft(durationsRef.current[phaseRef.current])
     setDistractions([])

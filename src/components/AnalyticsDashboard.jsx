@@ -45,8 +45,8 @@ const INTENSITY_STYLES = [
 ]
 
 // ── Main component ─────────────────────────────────────
-export default function AnalyticsDashboard({ sessions, onSeedData, onClearData }) {
-  const stats        = useAnalytics(sessions)
+export default function AnalyticsDashboard({ sessions, onSeedData, onClearData, projects = [], compact = false }) {
+  const stats        = useAnalytics(sessions, projects)
   const [historyPage, setHistoryPage] = useState(0)
   const [tooltip, setTooltip]         = useState(null)  // { day, x, y }
   const heatmapRef   = useRef(null)
